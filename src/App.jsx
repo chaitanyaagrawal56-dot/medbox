@@ -6,15 +6,19 @@ import {
 } from "lucide-react";
 
 /** ──────────────────────────────────────────────────────────────
- *  Google Drive Config (replace CLIENT_ID & API_KEY)
+ *  Google Drive (shared JSON file) — UPDATE THESE
  *  ──────────────────────────────────────────────────────────── */
 const GOOGLE = {
-  CLIENT_ID: "258361846848-0a6vcgnq0dc622879248uul13a42cabk.apps.googleusercontent.com",
-  API_KEY: "AIzaSyC_kLCW_zdAvde7h7OOrWdSYtSJoW0vp-w",
-  SCOPES: "https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file",
+  CLIENT_ID: "258361846848-0a6vcgnq0dc622879248uul13a42cabk.apps.googleusercontent.com", // from OAuth 2.0 Client ID
+  API_KEY: "AIzaSyC_kLCW_zdAvde7h7OOrWdSYtSJoW0vp-w",                                // from API Keys
+  SCOPES: "https://www.googleapis.com/auth/drive.file",
   DISCOVERY_DOCS: ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"],
 };
 
+// The ONE shared Drive file ID for everyone (Editor access needed)
+const FILE_ID = "1AvZ7xFESc1nDJFz8tJPrSjJyxNP2ZYTc"; // e.g. "1a2B3cDeFGHIjkLMnoPQ"
+
+/** Local storage key (fast local boot; Drive is source of truth) */
 const LS_KEY = "medbox-data-v3";
 
 export default function App() {
@@ -36,11 +40,10 @@ export default function App() {
   const [newCatName, setNewCatName] = useState("");
   const [newCatColor, setNewCatColor] = useState("#0ea5e9");
 
-  /** Persist to localStorage and push to Drive on every change (if signed in) */
+  /** Persist locally for fast boot */
   useEffect(() => {
     localStorage.setItem(LS_KEY, JSON.stringify(meds));
-    if (signedIn) pushToDrive({ meds, categories });
-  }, [meds, categories]); // eslint-disable-line
+  }, [meds]);
 
   /** Load Google libraries (gapi client + GIS) */
   useEffect(() => {
@@ -61,8 +64,12 @@ export default function App() {
     }
   }, []);
 
-  /** Sign in (GIS) → pull from Drive once */
+  /** Sign in (GIS) → pull shared JSON once */
   const signIn = async () => {
+    if (!FILE_ID || FILE_ID.startsWith("__PUT_")) {
+      alert("Please set FILE_ID in App.jsx to your shared Drive file ID.");
+      return;
+    }
     // @ts-ignore
     const tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE.CLIENT_ID,
@@ -72,8 +79,8 @@ export default function App() {
           setSignedIn(true);
           pullFromDrive().then((d) => {
             if (d) {
-              setMeds(d.meds || []);
-              setCategories(d.categories || categories);
+              setMeds(Array.isArray(d.meds) ? d.meds : []);
+              setCategories(Array.isArray(d.categories) ? d.categories : categories);
             }
           });
         } else {
@@ -84,67 +91,51 @@ export default function App() {
     tokenClient.requestAccessToken({ prompt: "consent" });
   };
 
-  /** Pull JSON (medbox.json) from Drive appDataFolder */
+  /** Pull JSON from the single shared Drive file */
   const pullFromDrive = async () => {
     try {
       // @ts-ignore
       const gapi = window.gapi;
-      const res = await gapi.client.drive.files.list({
-        spaces: "appDataFolder",
-        q: "name='medbox.json' and trashed=false",
-        fields: "files(id,name)",
+      const resp = await gapi.client.drive.files.get({
+        fileId: FILE_ID,
+        alt: "media",
       });
-      let fileId;
-      if ((res.result.files || []).length) {
-        fileId = res.result.files[0].id;
-      } else {
-        const create = await gapi.client.drive.files.create({
-          resource: { name: "medbox.json", parents: ["appDataFolder"] },
-          fields: "id",
-        });
-        fileId = create.result.id;
-      }
-      const resp = await gapi.client.drive.files.get({ fileId, alt: "media" });
-      return resp.body ? JSON.parse(resp.body) : null;
+      return resp.body ? JSON.parse(resp.body) : { meds: [], categories: [] };
     } catch (e) {
-      console.log(e);
+      console.error("Pull failed:", e);
       setStatus("Pull failed");
-      return null;
+      return { meds: [], categories: [] };
     }
   };
 
-  /** Push JSON to Drive appDataFolder (same file) */
+  /** Push JSON back to the same shared file */
   const pushToDrive = async (data) => {
     try {
       // @ts-ignore
       const gapi = window.gapi;
-      const res = await gapi.client.drive.files.list({
-        spaces: "appDataFolder",
-        q: "name='medbox.json' and trashed=false",
-        fields: "files(id,name)",
-      });
-      let fileId;
-      if ((res.result.files || []).length) {
-        fileId = res.result.files[0].id;
-      } else {
-        const create = await gapi.client.drive.files.create({
-          resource: { name: "medbox.json", parents: ["appDataFolder"] },
-          fields: "id",
-        });
-        fileId = create.result.id;
-      }
       await gapi.client.request({
-        path: `/upload/drive/v3/files/${fileId}`,
+        path: `/upload/drive/v3/files/${FILE_ID}`,
         method: "PATCH",
         params: { uploadType: "media" },
         body: JSON.stringify(data),
       });
       setStatus("Synced");
     } catch (e) {
-      console.log(e);
+      console.error("Push failed:", e);
       setStatus("Push failed");
     }
   };
+
+  /** On any change, push to Drive (if signed in) */
+  useEffect(() => {
+    if (!signedIn) return;
+    if (!FILE_ID || FILE_ID.startsWith("__PUT_")) return;
+    const t = setTimeout(() => {
+      pushToDrive({ meds, categories });
+    }, 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line
+  }, [meds, categories, signedIn]);
 
   /** Filters */
   const filtered = useMemo(() => {
@@ -197,7 +188,7 @@ export default function App() {
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <h1 className="text-2xl font-bold flex items-center gap-2">
           <Pill className="text-sky-400" /> MedBox
-          <span className="text-xs font-normal text-slate-400">— PWA Medicine Manager</span>
+          <span className="text-xs font-normal text-slate-400">— Shared Google Drive JSON</span>
         </h1>
         <div className="flex gap-2">
           <button
@@ -369,6 +360,11 @@ export default function App() {
           onRename={renameCategory}
           onDelete={deleteCategory}
         />
+      )}
+      {signedIn ? null : (
+        <p className="mt-4 text-xs text-slate-400">
+          Tip: After you sign in, edits auto-sync to the shared Drive file.
+        </p>
       )}
     </div>
   );
